@@ -1788,6 +1788,18 @@ func contains(a []string, x string) bool {
 	return false
 }
 
+func setupExporter(dsn string, opts ...ExporterOpt) *prometheus.Registry {
+	exporter := NewExporter([]string{dsn}, opts...)
+	defer func() {
+		exporter.servers.Close()
+	}()
+
+	registry := prometheus.NewRegistry()
+	registry.MustRegister(version.NewCollector("postgres_exporter"))
+	registry.MustRegister(exporter)
+	return registry
+}
+
 func main() {
 	kingpin.Version(fmt.Sprintf("postgres_exporter %s (built with %s)\n", Version, runtime.Version()))
 	log.AddFlags(kingpin.CommandLine)
@@ -1840,6 +1852,23 @@ func main() {
 	prometheus.MustRegister(version.NewCollector("postgres_exporter"))
 
 	prometheus.MustRegister(exporter)
+
+	registries := make(map[string]*prometheus.Registry)
+	http.HandleFunc("/probe", func(w http.ResponseWriter, r *http.Request) {
+		target := r.URL.Query().Get("target")
+		if target == "" {
+			http.Error(w, "'target' parameter must be specified", 400)
+			return
+		}
+
+		_, target_registered := registries[target]
+		if !target_registered {
+			log.Infof("Registering %s", target)
+			registries[target] = setupExporter(target, opts...)
+		}
+
+		promhttp.HandlerFor(registries[target], promhttp.HandlerOpts{}).ServeHTTP(w, r)
+	})
 
 	http.Handle(*metricPath, promhttp.Handler())
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
